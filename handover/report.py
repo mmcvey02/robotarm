@@ -218,7 +218,7 @@ def make_report(stages, out, ckpt=None, seed=None, baseline=None, task="receive"
                f"  peak joint speed {so['max_qd_ratio']:.2f}× limit\n"
                f"  peak TCP speed {so['max_tcp_speed']:.2f} m/s\n"
                f"  torque-limited cycles {so['torque_sat_frac']:.2%}\n"
-               f"  offer→grasp {so['mean_time_to_grasp']:.2f} s")
+               f"  offer→handoff {so['mean_time_to_grasp']:.2f} s")
         ax.axis("off")
         ax.set_title("Final held-out evaluation", loc="left", fontsize=11, color=INK, fontweight="bold")
         ax.text(0, 1, txt, va="top", fontsize=9, color=INK, transform=ax.transAxes, family="monospace")

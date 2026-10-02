@@ -47,6 +47,46 @@ correctly ignored (0 false reaches).
   came close to that limit.
 * A deployment would need a force-limited approach mode, or wrist F/T-triggered stopping, close to the hand.
 
+## Robot → human handover (giving parts)
+
+The robot starts at home holding a part. When a person reaches out an open hand, it brings the part's free end
+into their palm. It keeps holding while they close their grip, and lets go when the wrist F/T sensor feels them pull.
+
+**Result on a held-out test: 96.2 % of 1,200 reach-outs succeeded** (95 % CI 94.9–97.1 %), and 100 % of 200
+non-offer gestures were correctly ignored.
+Policy: `models/give_policy.pt`; metrics: `reports/final_eval_give.json`.
+
+| Metric (held-out) | Value |
+|---|---|
+| Give success (person walked away with the part, robot released it) | **96.2 %** |
+| Person took hold of the part | 99.3 % |
+| Dropped (released before the person had hold) | 0 % |
+| Held on too long: person pulled for 1.2 s without release (tug-of-war) | 2.4 % |
+| Part torn out of a still-closed gripper ("yanked") | 0.7 % |
+| Hand contact > 140 N | 0.8 % |
+| Non-offer gestures ignored | 100 % |
+| Success: cylinder / box / capsule / > 0.5 kg | 96 % / 95 % / 97 % / 94 % |
+| Pull onset → gripper released | 0.54 s (includes the 150 mm/s finger opening time) |
+| In successful gives: robot–hand contact / peak joint speed / peak TCP speed | none / 0.60 × limit / 0.63 m/s |
+
+![give report](reports/give_progress_final.png)
+
+**Human model for giving** (`handover/give_env.py`):
+* The person reaches an open hand into the handover zone. In 20 % of episodes they shift it while waiting.
+* They close their grip 0.2–0.4 s after the part's free end rests within 3.5 cm of their palm. The grip is a compliant weld.
+* After a further 0.1–0.3 s they draw the part back 25 cm. They pull with a limited force of 15–35 N and wait,
+  rather than yank harder, while the robot is still holding.
+* If the robot hasn't let go after 1.2 s of pulling, the episode fails (tug-of-war).
+* If the robot opens before the person has hold, the part falls and the episode fails.
+* Negative controls are checked. A robot that never releases fails 100 % (no_release). One that releases on approach
+  drops the part 100 %.
+
+**Training.** Same teacher-student DAgger as the receive task: about 1.2 M simulation steps, 40 minutes on 4 CPU cores.
+The privileged teacher knows when the pull starts. The student has to infer it from the wrist F/T reading.
+
+Train: `python3 -m handover.dagger --task give --out runs/give_dagger --iters 200 --eval_every 10`
+Evaluate: `python3 -m handover.final_eval models/give_policy.pt --task give`
+
 ## 1. Arm structure
 
 | Item | Choice | Why |
@@ -116,7 +156,8 @@ Other metrics are tracked during training and evaluation:
 
 ```
 handover/model.py     MJCF model of the cell (arm, gripper, sensors, human, objects)
-handover/env.py       Handover environment: control stack, sensor models, human model, reward, metrics
+handover/env.py       Receive (human→robot) env + shared control stack, sensor models, safety monitor, metrics
+handover/give_env.py  Give (robot→human) env: force-limited human pull model, release-on-pull task
 handover/ppo.py       PPO trainer with multiprocess vectorised envs, periodic deterministic evaluation
 handover/scripted.py  Privileged scripted controller (DAgger teacher; reads true state)
 handover/dagger.py    Teacher-student imitation (DAgger) trainer
