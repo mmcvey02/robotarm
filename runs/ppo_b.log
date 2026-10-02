@@ -1,4 +1,0 @@
-it 5 steps 0.03M fps 2475 ret -4.1 succ 0.000 grasp 0.000 dis 0.08 std 0.600 kl 0.0079
-it 10 steps 0.06M fps 2666 ret 3.4 succ 0.000 grasp 0.003 dis 0.05 std 0.597 kl 0.0111
-it 15 steps 0.09M fps 2735 ret 17.0 succ 0.000 grasp 0.003 dis 0.02 std 0.593 kl 0.0096
-[EVAL] it 15 steps 0.09M success 0.000 grasp 0.000 drop 0.000 unsafe 0.039 distractor 0.000
