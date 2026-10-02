@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 
 from .env import HandoverEnv, OBS_DIM, ACT_DIM
+from .scripted import scripted_action
 
 EVAL_SEED0 = 10_000_000
 
@@ -49,10 +50,10 @@ def worker(remote, wid, n_envs, seed):
                     else:
                         idle[i] = True
                 obs[i] = o
-            # final observation is needed for bootstrapping truncated episodes
-            remote.send((obs.copy(), rews, dones, truncs, infos, idle.copy()))
-        elif cmd == "final_obs":
-            remote.send(None)
+            teacher = np.stack([scripted_action(e) for e in envs]).astype(np.float32)
+            remote.send((obs.copy(), rews, dones, truncs, infos, idle.copy(), teacher))
+        elif cmd == "teacher":
+            remote.send(np.stack([scripted_action(e) for e in envs]).astype(np.float32))
         elif cmd == "eval":
             eval_queue = data
             idle[:] = False
@@ -102,7 +103,13 @@ class VecEnv:
         trunc = np.concatenate([x[3] for x in res])
         infos = sum([x[4] for x in res], [])
         idle = np.concatenate([x[5] for x in res])
+        self.teacher = np.concatenate([x[6] for x in res])
         return obs, rew, done, trunc, infos, idle
+
+    def teacher_actions(self):
+        for r in self.remotes:
+            r.send(("teacher", None))
+        return np.concatenate([r.recv() for r in self.remotes])
 
     def start_eval(self, episodes):
         """episodes: list of (seed, distractor). Distributed round-robin over envs."""
@@ -236,6 +243,14 @@ def train(args):
         norm.load(s["norm"])
         it0, steps, best = s["it"], s["steps"], s.get("best", -1.0)
         print(f"resumed from it {it0}, {steps} steps", flush=True)
+    elif args.init_from:
+        s = torch.load(args.init_from, weights_only=False)
+        ac.load_state_dict(s["model"])
+        norm.load(s["norm"])
+        with torch.no_grad():
+            ac.log_std.fill_(args.init_log_std)
+        opt = torch.optim.Adam(ac.parameters(), lr=args.lr, eps=1e-5)
+        print(f"initialised actor from {args.init_from}", flush=True)
     obs = venv.train_mode()
     ep_ret = np.zeros(N)
     ep_len = np.zeros(N)
@@ -312,7 +327,10 @@ def train(args):
                 v_cl = bv_old[idx] + (v - bv_old[idx]).clamp(-args.clip * 10, args.clip * 10)
                 vl = torch.max((v - bret[idx]) ** 2, (v_cl - bret[idx]) ** 2).mean()
                 ent = dist.entropy().sum(-1).mean()
-                loss = pg + 0.5 * vl - args.ent * ent
+                if it < args.critic_warmup:
+                    loss = 0.5 * vl  # fit the critic to the imitation policy before moving the actor
+                else:
+                    loss = pg + 0.5 * vl - args.ent * ent
                 opt.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(ac.parameters(), 0.5)
@@ -394,6 +412,9 @@ def main():
     p.add_argument("--eval_every", type=int, default=15)
     p.add_argument("--eval_episodes", type=int, default=210)
     p.add_argument("--target", type=float, default=0.88)
+    p.add_argument("--init_from", default=None)
+    p.add_argument("--init_log_std", type=float, default=-1.2)
+    p.add_argument("--critic_warmup", type=int, default=0)
     args = p.parse_args()
     torch.set_num_threads(4)
     train(args)

@@ -54,6 +54,8 @@ def style(ax, title, ylabel=None, pct=False):
 
 
 def line(ax, x, y, c, label, lw=2, ls="-", marker=None):
+    if marker is None and len(x) < 40:
+        marker = "o"
     ax.plot(x, y, color=c, lw=lw, ls=ls, label=label, marker=marker, ms=4)
 
 
@@ -83,9 +85,28 @@ def rollout_frames(ckpt, seed, n_frames=6, size=(320, 400)):
     return [frames[i] for i in idx], wrist, info
 
 
-def make_report(run, out, ckpt=None, seed=None):
-    tr = load_jsonl(os.path.join(run, "train.jsonl"))
-    ev = load_jsonl(os.path.join(run, "eval.jsonl"))
+def load_stages(stages):
+    """Concatenate logs of consecutive training stages on a common step axis."""
+    tr, ev, bounds, off = [], [], [], 0
+    for run, label in stages:
+        t = load_jsonl(os.path.join(run, "train.jsonl"))
+        e = load_jsonl(os.path.join(run, "eval.jsonl"))
+        if not t and not e:
+            continue
+        for x in t:
+            x["steps"] += off
+        for x in e:
+            x["steps"] += off
+        tr += t
+        ev += e
+        bounds.append((off, label))
+        off = max([x["steps"] for x in t + e])
+    return tr, ev, bounds
+
+
+def make_report(stages, out, ckpt=None, seed=None, baseline=None):
+    tr, ev, bounds = load_stages(stages)
+    base = load_jsonl(os.path.join(baseline, "eval.jsonl")) if baseline else []
     fig = plt.figure(figsize=(16, 15), facecolor="white")
     gs = fig.add_gridspec(5, 4, height_ratios=[0.22, 1, 1, 1, 1.15], hspace=0.5, wspace=0.28)
 
@@ -96,31 +117,38 @@ def make_report(run, out, ckpt=None, seed=None):
     # ---- header / KPI tiles
     axh = fig.add_subplot(gs[0, :])
     axh.axis("off")
-    hours = (tr[-1]["time"] - tr[0]["time"]) / 3600 if len(tr) > 1 else 0
+    times = [x["time"] for x in tr + ev + base]
+    hours = (max(times) - min(times)) / 3600 if times else 0
     last = ev[-1] if ev else {}
     best = max(ev, key=lambda e: e["success"]) if ev else {}
     tiles = [
         ("Eval success (latest)", f"{last.get('success', float('nan')):.1%}"),
         ("Best eval success", f"{best.get('success', float('nan')):.1%}"),
         ("Target", "> 85%"),
-        ("Env steps", f"{xs[-1]:.1f} M" if len(xs) else "0"),
-        ("Simulated time", f"{(xs[-1]*1e6*0.05/3600 if len(xs) else 0):.0f} h"),
+        ("Env steps", f"{max(np.r_[xs, xe, 0]):.1f} M"),
+        ("Simulated time", f"{max(np.r_[xs, xe, 0])*1e6*0.05/3600:.0f} h"),
         ("Wall-clock", f"{hours:.2f} h"),
     ]
     for i, (k, v) in enumerate(tiles):
         x0 = i / len(tiles)
         axh.text(x0, 0.95, k, fontsize=10, color=INK2, transform=axh.transAxes, va="top")
         axh.text(x0, 0.45, v, fontsize=22, color=INK, fontweight="bold", transform=axh.transAxes, va="top")
-    fig.suptitle("Robot-arm handover policy — training progress (MuJoCo, PPO)", x=0.06, ha="left",
+    fig.suptitle("Robot-arm handover policy — training progress (MuJoCo; DAgger imitation → PPO)", x=0.06, ha="left",
                  y=0.93, fontsize=16, fontweight="bold", color=INK)
 
     # ---- 1 success
     ax = fig.add_subplot(gs[1, 0:2])
     if len(xs):
         line(ax, xs, smooth(g(tr, "train_success")), C2, "training rollouts (stochastic, smoothed)", lw=1.5)
+    if base:
+        line(ax, np.array([e["steps"] for e in base]) / 1e6, g(base, "success"), C3,
+             "baseline: PPO from scratch (eval)", lw=1.5)
     if len(xe):
         line(ax, xe, g(ev, "success"), C1, "evaluation (deterministic, fixed 180 offers)", marker="o")
     ax.axhline(0.85, color=TARGET, ls="--", lw=1.2)
+    for b0, lab in bounds:
+        ax.axvline(b0 / 1e6, color=GRID, lw=1.5)
+        ax.text(b0 / 1e6, 0.95, " " + lab, color=INK2, fontsize=8)
     ax.text(ax.get_xlim()[0], 0.865, " 85% target", color=INK2, fontsize=8)
     style(ax, "Handover success rate (grasped + held 1 s after human lets go)", pct=True)
     legend(ax)
@@ -188,7 +216,7 @@ def make_report(run, out, ckpt=None, seed=None):
     # ---- 8 success by object type (latest eval)
     ax = fig.add_subplot(gs[3, 3])
     if last:
-        names = ["cylinder", "box", "capsule", "heavy >0.5 kg"]
+        names = ["cylinder", "box", "capsule", "heavy"]
         vals = [last.get("success_cyl", np.nan), last.get("success_box", np.nan),
                 last.get("success_cap", np.nan), last.get("success_heavy", np.nan)]
         bars = ax.bar(names, vals, color=C1, width=0.6, edgecolor="white", linewidth=2)
@@ -208,13 +236,15 @@ def make_report(run, out, ckpt=None, seed=None):
             ax.imshow(im)
             ax.axis("off")
             ax.set_title(f"t = {t:.2f} s", fontsize=9, color=INK2)
+            if i == 0:
+                first = ax
         ax = fig.add_subplot(sub[0, len(frames)])
         ax.imshow(wrist)
         ax.axis("off")
         ax.set_title("wrist camera (final)", fontsize=9, color=INK2)
         outcome = "SUCCESS" if info.get("success") else f"FAIL ({info.get('fail')})"
-        fig.text(0.06, 0.215, f"Sample evaluation rollout with current best policy — outcome: {outcome}",
-                 fontsize=11, fontweight="bold", color=INK)
+        first.text(0, 1.2, f"Sample evaluation rollout with current best policy — outcome: {outcome}",
+                   transform=first.transAxes, fontsize=11, fontweight="bold", color=INK)
     fig.savefig(out, dpi=80, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     return out
@@ -222,11 +252,12 @@ def make_report(run, out, ckpt=None, seed=None):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--run", default="runs/ppo_a")
+    p.add_argument("--stages", default="runs/dagger:Stage 1 imitation (DAgger),runs/ppo_ft:Stage 2 PPO fine-tune")
+    p.add_argument("--baseline", default="runs/ppo_b")
     p.add_argument("--out", default="reports/progress.png")
     p.add_argument("--ckpt", default=None)
     p.add_argument("--seed", type=int, default=None)
     a = p.parse_args()
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
-    ck = a.ckpt or os.path.join(a.run, "ckpt_best.pt")
-    print(make_report(a.run, a.out, ck, a.seed))
+    stages = [tuple(x.split(":", 1)) for x in a.stages.split(",")]
+    print(make_report(stages, a.out, a.ckpt, a.seed, a.baseline))

@@ -97,7 +97,7 @@ def build_xml() -> str:
     <light pos="1.5 1 2" dir="-0.4 -0.3 -1" diffuse="0.3 0.3 0.3" castshadow="false"/>
     <geom name="table" type="box" size="1.0 0.8 0.02" pos="0.5 0 -0.02" material="table"
           contype="{TABLE}" conaffinity="{ROBOT|OBJ}"/>
-    <camera name="overview" pos="0.55 -1.45 0.85" xyaxes="1 0 0 0 0.45 0.89" fovy="50"/>
+    <camera name="overview" pos="0.75 -0.95 0.75" xyaxes="0.954 0.301 -0.000 -0.128 0.407 0.904" fovy="55"/>
     <camera name="side" pos="1.6 -1.1 1.0" xyaxes="0.6 0.8 0 -0.35 0.26 0.9" fovy="45"/>
     <!-- external stereo depth camera used for human / object tracking -->
     <camera name="scene_depth" pos="-0.25 0 1.1" xyaxes="0 -1 0 0.8 0 0.6" fovy="70"/>
@@ -143,7 +143,7 @@ def build_xml() -> str:
                     <inertial mass="0.9" pos="0 0 0.05" diaginertia="0.0012 0.0012 0.0009"/>
                     <geom name="ft_body" type="cylinder" size="0.04 0.0175" pos="0 0 0.0175" material="grip"/>
                     <geom name="palm" type="box" size="0.03 0.05 0.03" pos="0 0 0.065" material="grip"/>
-                    <camera name="wrist_cam" pos="0.055 0 0.05" xyaxes="0 -1 0 0.97 0 0.26" fovy="87"/>
+                    <camera name="wrist_cam" pos="0.055 0 0.05" xyaxes="0 1 0 0.97 0 0.26" fovy="87"/>
                     <geom type="box" size="0.012 0.02 0.012" pos="0.045 0 0.05" rgba="0.1 0.1 0.1 1"
                           contype="0" conaffinity="0"/>
                     <site name="tcp" pos="0 0 0.14" size="0.006" rgba="0 1 0 0.6"/>
