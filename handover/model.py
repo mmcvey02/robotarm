@@ -13,7 +13,9 @@ through a weld constraint; the human "lets go" by deactivating the weld once
 the robot's grip is established. The torso is a non-colliding visual.
 
 Objects: three free bodies (cylinder, box, capsule). Only one is active per
-episode; size, mass and friction are randomised at runtime.
+episode; size, mass and friction are randomised at runtime. NOTE: the XML sizes
+are the *maximum* randomised sizes, because MuJoCo's mid-phase bounding volumes
+are computed at compile time and must enclose every runtime size.
 """
 
 import numpy as np
@@ -83,8 +85,9 @@ def build_xml() -> str:
                forcerange="-28 28" ctrlrange="-6.3 6.3"/>
     </default>
     <default class="finger">
-      <joint type="slide" range="0 0.0425" armature="0.02" damping="10" frictionloss="0.5"/>
-      <general gaintype="fixed" biastype="affine" gainprm="6000" biasprm="0 -6000 -40"
+      <!-- armature = reflected inertia of the non-backdrivable finger drive (motor + worm gear) -->
+      <joint type="slide" range="0 0.0425" armature="0.5" damping="10" frictionloss="0.5"/>
+      <general gaintype="fixed" biastype="affine" gainprm="6000" biasprm="0 -6000 -100"
                forcerange="-40 40" ctrlrange="0 0.0425"/>
     </default>
   </default>
@@ -149,7 +152,8 @@ def build_xml() -> str:
                       <joint name="finger_l" class="finger" axis="0 1 0"/>
                       <geom type="box" size="0.011 0.006 0.025" pos="0 0.012 0.115" material="grip"/>
                       <geom name="pad_l" type="box" size="0.011 0.004 0.022" pos="0 0.004 0.14"
-                            material="pad" condim="4" friction="1.0 0.02 0.002" priority="1"/>
+                            material="pad" condim="4" friction="1.0 0.02 0.002" priority="1"
+                            solref="0.005 1" solimp="0.95 0.99 0.001"/>
                       <site name="pad_l_site" type="box" size="0.012 0.006 0.023" pos="0 0.004 0.14"
                             rgba="0 0 0 0"/>
                     </body>
@@ -158,7 +162,8 @@ def build_xml() -> str:
                       <joint name="finger_r" class="finger" axis="0 -1 0"/>
                       <geom type="box" size="0.011 0.006 0.025" pos="0 -0.012 0.115" material="grip"/>
                       <geom name="pad_r" type="box" size="0.011 0.004 0.022" pos="0 -0.004 0.14"
-                            material="pad" condim="4" friction="1.0 0.02 0.002" priority="1"/>
+                            material="pad" condim="4" friction="1.0 0.02 0.002" priority="1"
+                            solref="0.005 1" solimp="0.95 0.99 0.001"/>
                       <site name="pad_r_site" type="box" size="0.012 0.006 0.023" pos="0 -0.004 0.14"
                             rgba="0 0 0 0"/>
                     </body>
@@ -187,17 +192,17 @@ def build_xml() -> str:
     <!-- ===================== objects ===================== -->
     <body name="obj_cyl" pos="0 1.5 -1">
       <freejoint name="obj_cyl"/>
-      <geom name="obj_cyl" type="cylinder" size="0.025 0.08" mass="0.3" material="obj" condim="4"
+      <geom name="obj_cyl" type="cylinder" size="0.034 0.11" mass="0.3" material="obj" condim="4"
             contype="{OBJ}" conaffinity="{ROBOT|TABLE}" friction="0.8 0.02 0.002"/>
     </body>
     <body name="obj_box" pos="0.2 1.5 -1">
       <freejoint name="obj_box"/>
-      <geom name="obj_box" type="box" size="0.02 0.03 0.08" mass="0.3" material="obj" condim="4"
+      <geom name="obj_box" type="box" size="0.034 0.045 0.11" mass="0.3" material="obj" condim="4"
             contype="{OBJ}" conaffinity="{ROBOT|TABLE}" friction="0.8 0.02 0.002"/>
     </body>
     <body name="obj_cap" pos="0.4 1.5 -1">
       <freejoint name="obj_cap"/>
-      <geom name="obj_cap" type="capsule" size="0.02 0.06" mass="0.3" material="obj" condim="4"
+      <geom name="obj_cap" type="capsule" size="0.03 0.08" mass="0.3" material="obj" condim="4"
             contype="{OBJ}" conaffinity="{ROBOT|TABLE}" friction="0.8 0.02 0.002"/>
     </body>
   </worldbody>

@@ -112,8 +112,8 @@ class HandoverEnv:
             size = np.array([r, hl, 0])
             half = np.array([r, r, hl + r])
         m.geom_size[g] = size
-        m.geom_rbound[g] = np.linalg.norm(half)
-        m.geom_aabb[g] = np.r_[0, 0, 0, half]
+        # geom_rbound / geom_aabb / bvh_aabb keep their compile-time (max-size) values,
+        # which conservatively enclose every randomised size.
         mass = rng.uniform(0.05, 0.8)
         b = self.obj_body[k]
         m.body_mass[b] = mass
