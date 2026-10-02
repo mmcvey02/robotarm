@@ -31,6 +31,8 @@ def main():
     p.add_argument("--eval_every", type=int, default=5)
     p.add_argument("--eval_episodes", type=int, default=210)
     p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--init", default=None, help="warm-start student weights + obs normaliser")
+    p.add_argument("--beta_iters", type=float, default=8, help="iterations over which teacher mixing decays")
     a = p.parse_args()
     os.makedirs(a.out, exist_ok=True)
     torch.manual_seed(a.seed)
@@ -39,14 +41,18 @@ def main():
     ac = ActorCritic()
     opt = torch.optim.Adam(ac.pi.parameters(), lr=1e-3)
     norm = RunningNorm(OBS_DIM)
+    if a.init:
+        s0 = torch.load(a.init, weights_only=False)
+        ac.load_state_dict(s0["model"])
+        norm.load(s0["norm"])
     N = venv.n
     obs = venv.train_mode()
     teacher = venv.teacher_actions()
     data_o, data_a = [], []
     steps = 0
-    use_teacher = np.ones(N, bool)
+    use_teacher = np.ones(N, bool) if a.beta_iters > 0 else np.zeros(N, bool)
     for it in range(a.iters):
-        beta = max(0.0, 1.0 - it / 8)  # probability an episode is driven by the teacher
+        beta = max(0.0, 1.0 - it / a.beta_iters) if a.beta_iters > 0 else 0.0  # probability an episode is driven by the teacher
         t0 = time.time()
         for t in range(a.horizon):
             data_o.append(obs.copy())

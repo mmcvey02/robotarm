@@ -2,9 +2,50 @@
 
 A kinematic control policy for a collaborative robot arm. A human holds out a
 component, and the policy decides when the offer is real, reaches for it,
-grasps it, and holds it once the human lets go. It is trained with
-reinforcement learning (PPO) in a MuJoCo simulation that enforces physical
-limits.
+grasps it, and holds it once the human lets go. It is trained in a MuJoCo
+simulation that enforces physical limits, by teacher-student imitation
+learning (DAgger).
+
+## Result
+
+**89.2 % handover success on a held-out test of 1,200 new offers** (95 % CI 87.4–90.9 %, target > 85 %).
+The test seeds were never used in training or in model selection. All 200 non-offer episodes were
+correctly ignored (0 false reaches).
+
+| Metric (held-out, `reports/final_eval.json`) | Value |
+|---|---|
+| Handover success | **89.2 %** (CI 87.4–90.9 %) |
+| Grasp established | 93.3 % |
+| Dropped after human release | 3.5 % |
+| Timed out (no grasp within 9 s) | 3.6 % |
+| Hand contact > 140 N (counted as failure) | 3.3 % |
+| Protective stop (speed limit exceeded) | 0.3 % |
+| Any robot–hand contact | 4.9 % |
+| Non-offers correctly ignored | 100 % |
+| Success by object: cylinder / box / capsule / > 0.5 kg | 96 % / 75 % / 99 % / 89 % |
+| Offer → secure grasp time (successful episodes) | 1.82 s |
+| In successful handovers: peak joint speed / peak TCP speed / torque-limited servo cycles | 0.74 × limit / 0.75 m/s / 0.1 % |
+| Contact with the human hand in successful handovers | 139 N peak |
+
+![final report](reports/progress_final.png)
+
+**How it was trained.**
+1. *PPO from scratch* (baseline) stayed near 0 % success after 0.7 M steps.
+2. *DAgger*:
+   * The teacher is a privileged scripted controller. It reads the true object pose and reaches 94–96 % success.
+   * The student is the 256×256 MLP policy, which sees only noisy, delayed sensor observations.
+   * The student's own rollouts were relabelled with teacher actions.
+   * After about 1.5 M steps the student reached about 90 %.
+   * It was then re-trained on the final environment, which adds the safety monitor, joint acceleration limits and table clearance.
+3. *PPO fine-tuning* of the DAgger policy lowered success in the first 0.5 M steps (92 % → 80–84 %).
+   It was stopped, and the DAgger policy (`models/handover_policy.pt`) is the deliverable.
+   The logs are in `reports/logs/`.
+
+**Known weaknesses.**
+* Boxes succeed 75 % of the time. Wide, tilted boxes need precise yaw alignment of the gripper.
+* In 3.3 % of offers the robot pressed on the hand above 140 N, and some successful handovers also
+  came close to that limit.
+* A deployment would need a force-limited approach mode, or wrist F/T-triggered stopping, close to the hand.
 
 ## 1. Arm structure
 
@@ -30,6 +71,8 @@ limits.
 
 ## 3. Simulation and physical constraints
 
+* A safety monitor at 100 Hz triggers a protective stop, which counts as a failure, if any joint exceeds 180 °/s
+  or the TCP exceeds 1.0 m/s. Commanded joint speed is capped at 85 % of the limit and joint acceleration at 8 rad/s².
 * MuJoCo 3 rigid-body dynamics at a 2 ms step (500 Hz servo). Contacts use an elliptic friction cone
   and torsional friction at the pads.
 * Joint position, velocity and torque limits are enforced at the right level:
@@ -75,9 +118,14 @@ Other metrics are tracked during training and evaluation:
 handover/model.py     MJCF model of the cell (arm, gripper, sensors, human, objects)
 handover/env.py       Handover environment: control stack, sensor models, human model, reward, metrics
 handover/ppo.py       PPO trainer with multiprocess vectorised envs, periodic deterministic evaluation
-handover/scripted.py  Privileged scripted controller (feasibility check only)
+handover/scripted.py  Privileged scripted controller (DAgger teacher; reads true state)
+handover/dagger.py    Teacher-student imitation (DAgger) trainer
+handover/final_eval.py  Held-out evaluation with Wilson confidence interval
+models/handover_policy.pt  Final policy (actor/critic weights + observation normaliser)
 handover/report.py    Progress dashboard (multi-metric curves + rendered rollout filmstrip)
 ```
 
-Train: `python3 -m handover.ppo --out runs/ppo_a`
+Train: `python3 -m handover.dagger --out runs/dagger --iters 250 --eval_every 10`
+(optional fine-tune: `python3 -m handover.ppo --out runs/ppo_ft --init_from <ckpt> --critic_warmup 25`)
+Evaluate: `python3 -m handover.final_eval models/handover_policy.pt`
 Report: `MUJOCO_GL=osmesa python3 -m handover.report --run runs/ppo_a --out reports/progress.png`

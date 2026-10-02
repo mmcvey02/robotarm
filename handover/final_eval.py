@@ -43,6 +43,17 @@ def main():
         if not i["success"]:
             fails[i["fail"]] = fails.get(i["fail"], 0) + 1
     res["failure_modes"] = fails
+    ok = [i for i in h if i["success"]]
+    # physical-constraint usage within successful handovers (the deployable behaviour)
+    res["success_only"] = dict(
+        max_qd_ratio=float(max(i["max_qd_ratio"] for i in ok)),
+        max_tcp_speed=float(max(i["max_tcp_speed"] for i in ok)),
+        max_hand_force=float(max(i["max_hand_force"] for i in ok)),
+        torque_sat_frac=float(np.mean([i["torque_sat_frac"] for i in ok])),
+        jl_frac=float(np.mean([i["jl_frac"] for i in ok])),
+        mean_time_to_grasp=float(np.nanmean([i["time_to_grasp"] for i in ok])),
+        mean_episode_time=float(np.mean([i["episode_time"] for i in ok])),
+    )
     print(json.dumps(res, indent=1))
     if a.out:
         with open(a.out, "w") as f:

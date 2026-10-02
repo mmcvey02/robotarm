@@ -31,6 +31,9 @@ A_MAX = 4.0  # m/s^2
 ALPHA_MAX = 12.0  # rad/s^2
 FINGER_OPEN = 0.0425
 HAND_FORCE_LIMIT = 140.0  # N, ISO/TS 15066 quasi-static limit for hand/fingers
+QD_CMD_FRAC = 0.85  # commanded joint speed stays below 85 % of the motor limit (tracking margin)
+JOINT_ACC = 8.0  # rad/s^2 commanded joint acceleration limit
+TCP_STOP_SPEED = 1.0  # m/s safety-monitor TCP speed limit (protective stop)
 OBS_DIM = 69
 ACT_DIM = 7
 
@@ -87,6 +90,7 @@ class HandoverEnv:
         mujoco.mj_forward(m, self.d)
         self.tcp_home = self.d.site_xpos[self.tcp].copy()
         self._jac = np.zeros((6, m.nv))
+        self._vel6 = np.zeros(6)
         self.force_episode = None  # (is_distractor) override for evaluation
 
     # ------------------------------------------------------------------ setup
@@ -162,7 +166,7 @@ class HandoverEnv:
         self.waypoints = []  # list of (t_start, duration, from, to)
         if not self.distractor:
             g = np.array([rng.uniform(0.42, 0.68), rng.uniform(-0.3, 0.3), rng.uniform(0.18, 0.55)])
-            hand_tgt = g - self.grasp_off - self.obj_in_hand
+            hand_tgt = self._clear_table(g - self.grasp_off - self.obj_in_hand)
             self.waypoints.append((self.t0, self.T_app, start, hand_tgt))
             self.t_present = self.t0 + self.T_app
             if rng.random() < 0.2:  # human re-adjusts the offer mid-way
@@ -189,7 +193,11 @@ class HandoverEnv:
                     self.waypoints.append((t, T, p, q))
                     t += T + rng.uniform(0.0, 0.6)
                     p = q
+        start = self._clear_table(start)
         self.hand_start = start
+        self.waypoints = [(ts, T, self._clear_table(a), self._clear_table(b)) for (ts, T, a, b) in self.waypoints]
+        if self.waypoints and not self.distractor:
+            self.waypoints[0] = (self.waypoints[0][0], self.waypoints[0][1], start, self.waypoints[0][3])
         # hold behaviour: slow drift + physiological tremor
         self.drift_amp = rng.uniform(0.0, 0.015, size=3)
         self.drift_f = rng.uniform(0.15, 0.6, size=3)
@@ -197,6 +205,16 @@ class HandoverEnv:
         self.tremor = rng.uniform(0.0005, 0.002)
         self.reaction = rng.uniform(0.15, 0.35)
         self.retreat_T = rng.uniform(0.6, 1.0)
+
+    def _clear_table(self, hand):
+        """Raise a hand waypoint so the held object stays >= 3 cm above the table."""
+        a = self.R_obj[:, 2]
+        lat = max(self.half[0], self.half[1])
+        c = hand + self.obj_in_hand
+        low = c[2] - abs(a[2]) * self.half[2] - np.sqrt(max(0.0, 1 - a[2] ** 2)) * lat
+        hand = hand.copy()
+        hand[2] += max(0.0, 0.03 - low)
+        return hand
 
     def _hand_pos(self, t):
         if self.release_t is not None:
@@ -264,6 +282,8 @@ class HandoverEnv:
         self.ft_bias = None
         self.prev_action = np.zeros(ACT_DIM)
         self.v_prev = np.zeros(3)
+        self.qd_prev = np.zeros(6)
+        self.pstop = False
         self.w_prev = np.zeros(3)
         self.vel_hist = []
         self.last_seen = None
@@ -403,13 +423,18 @@ class HandoverEnv:
         J = self._jac[:, self.vadr]
         lam = 0.03
         qd = J.T @ np.linalg.solve(J @ J.T + lam**2 * np.eye(6), np.r_[v, w])
-        r = np.max(np.abs(qd) / VEL_LIMITS)
+        r = np.max(np.abs(qd) / (QD_CMD_FRAC * VEL_LIMITS))
         if r > 1:
             qd /= r
+        dqd = qd - self.qd_prev
+        r = np.max(np.abs(dqd)) / (JOINT_ACC * CTRL_DT)
+        if r > 1:
+            qd = self.qd_prev + dqd / r
         nxt = np.clip(self.q_tgt + qd * CTRL_DT, JOINT_LIMITS[:, 0] + 0.03, JOINT_LIMITS[:, 1] - 0.03)
         qd = (nxt - self.q_tgt) / CTRL_DT
         q = d.qpos[self.qadr]
-        self.q_tgt = np.clip(nxt, q - 0.12, q + 0.12)  # anti wind-up under contact
+        self.q_tgt = np.clip(nxt, q - 0.05, q + 0.05)  # anti wind-up under contact
+        self.qd_prev = qd
 
         # --- gripper (binary command, finite closing speed)
         self.grip_cmd = 1.0 if a[6] > 0 else 0.0
@@ -429,6 +454,14 @@ class HandoverEnv:
             mujoco.mj_step(m, d, nstep=N_SUB // 5)
             self.mt["torque_sat"] += int(np.any(np.abs(d.actuator_force[:6]) > 0.98 * TORQUE_LIMITS))
             self.mt["sub"] += 1
+            # safety monitor (100 Hz): joint speed and TCP speed limits -> protective stop
+            qr = float(np.max(np.abs(d.qvel[self.vadr]) / VEL_LIMITS))
+            mujoco.mj_objectVelocity(m, d, mujoco.mjtObj.mjOBJ_SITE, self.tcp, self._vel6, 0)
+            vt = float(np.linalg.norm(self._vel6[3:]))
+            self.mt["max_qd_ratio"] = max(self.mt["max_qd_ratio"], qr)
+            self.mt["max_tcp_speed"] = max(self.mt["max_tcp_speed"], vt)
+            if qr > 1.0 or vt > TCP_STOP_SPEED:
+                self.pstop = True
         self.t += CTRL_DT
         self.steps += 1
 
@@ -454,11 +487,8 @@ class HandoverEnv:
 
         # --- metrics
         tcp_new = d.site_xpos[self.tcp]
-        sp = np.linalg.norm(tcp_new - tcp) / CTRL_DT
         mt = self.mt
         mt["path"] += np.linalg.norm(tcp_new - tcp)
-        mt["max_tcp_speed"] = max(mt["max_tcp_speed"], sp)
-        mt["max_qd_ratio"] = max(mt["max_qd_ratio"], float(np.max(np.abs(d.qvel[self.vadr]) / VEL_LIMITS)))
         qn = d.qpos[self.qadr]
         mt["jl_hits"] += int(np.any((qn < JOINT_LIMITS[:, 0] + 0.01) | (qn > JOINT_LIMITS[:, 1] - 0.01)))
         if hand_f > 0:
@@ -490,6 +520,9 @@ class HandoverEnv:
         if hand_f > HAND_FORCE_LIMIT:
             done, fail = True, "unsafe_contact"
             rew -= 20
+        if self.pstop and not done:
+            done, fail = True, "protective_stop"
+            rew -= 10
         presented = self.t >= self.t_present - 0.3
         if self.distractor:
             rew -= 2.0 * max(0.0, dist_home - 0.08) + 0.1 * self.grip_cmd
@@ -519,7 +552,7 @@ class HandoverEnv:
                     mt["hold_steps"] += 1
                 else:
                     mt["hold_steps"] = 0
-                if mt["hold_steps"] >= 20:  # held securely for 1 s after the human let go
+                if mt["hold_steps"] >= 20 and fail is None:  # held securely for 1 s after the human let go
                     done, success = True, True
                     rew += 30.0
                 if c[2] < 0.03 or np.linalg.norm(c - tcp_new) > 0.2:

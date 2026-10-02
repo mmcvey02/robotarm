@@ -1,0 +1,43 @@
+{
+ "success": 0.8925,
+ "grasp_rate": 0.9325,
+ "drop_rate": 0.035,
+ "timeout_rate": 0.035833333333333335,
+ "unsafe_rate": 0.03333333333333333,
+ "pstop_rate": 0.0033333333333333335,
+ "hand_contact_rate": 0.049166666666666664,
+ "time_to_grasp": 1.8540577976888033,
+ "peak_hand_force": 502.96377780748463,
+ "max_tcp_speed": 1.4582618293645793,
+ "max_qd_ratio": 1.6454464344607251,
+ "torque_sat_frac": 0.009876347070945759,
+ "jl_frac": 0.001884007179867299,
+ "path": 0.38947354064592454,
+ "success_cyl": 0.9635974304068522,
+ "success_box": 0.7488372093023256,
+ "success_cap": 0.9867986798679867,
+ "success_heavy": 0.8879310344827587,
+ "n_handover": 1200,
+ "distractor_success": 1.0,
+ "false_reach_rate": 0.0,
+ "n_distractor": 200,
+ "success_ci95": [
+  0.8737050643625337,
+  0.9087899083980022
+ ],
+ "failure_modes": {
+  "unsafe_contact": 40,
+  "drop": 42,
+  "timeout": 43,
+  "protective_stop": 4
+ },
+ "success_only": {
+  "max_qd_ratio": 0.7425743504141616,
+  "max_tcp_speed": 0.7527368358430986,
+  "max_hand_force": 139.21634481448194,
+  "torque_sat_frac": 0.0009843636043814262,
+  "jl_frac": 1.832823395183279e-05,
+  "mean_time_to_grasp": 1.8211464299908753,
+  "mean_episode_time": 4.822502334267031
+ }
+}

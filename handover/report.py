@@ -133,7 +133,7 @@ def make_report(stages, out, ckpt=None, seed=None, baseline=None):
         x0 = i / len(tiles)
         axh.text(x0, 0.95, k, fontsize=10, color=INK2, transform=axh.transAxes, va="top")
         axh.text(x0, 0.45, v, fontsize=22, color=INK, fontweight="bold", transform=axh.transAxes, va="top")
-    fig.suptitle("Robot-arm handover policy — training progress (MuJoCo; DAgger imitation → PPO)", x=0.06, ha="left",
+    fig.suptitle("Robot-arm handover policy — training progress (MuJoCo; teacher–student DAgger)", x=0.06, ha="left",
                  y=0.93, fontsize=16, fontweight="bold", color=INK)
 
     # ---- 1 success
@@ -167,6 +167,7 @@ def make_report(stages, out, ckpt=None, seed=None, baseline=None):
     if len(xe):
         line(ax, xe, g(ev, "hand_contact_rate"), C1, "any robot-hand contact")
         line(ax, xe, g(ev, "unsafe_rate"), C2, "contact > 140 N (ISO/TS 15066)")
+        line(ax, xe, g(ev, "pstop_rate"), C3, "protective stop (speed limit)")
     style(ax, "Human safety", pct=True)
     legend(ax)
 
@@ -186,16 +187,36 @@ def make_report(stages, out, ckpt=None, seed=None, baseline=None):
 
     # ---- 6 return
     ax = fig.add_subplot(gs[2, 3])
-    if len(xs):
-        line(ax, xs, smooth(g(tr, "ep_return")), C1, "")
-    style(ax, "Episode return (training)", "return")
+    fe = "reports/final_eval.json"
+    if os.path.exists(fe):
+        with open(fe) as f:
+            r = json.load(f)
+        so = r["success_only"]
+        lo, hi = r["success_ci95"]
+        txt = (f"Held-out test ({r['n_handover']} offers, {r['n_distractor']} non-offers)\n\n"
+               f"Success: {r['success']:.1%}  (95% CI {lo:.1%}–{hi:.1%})\n"
+               f"Non-offers ignored: {r['distractor_success']:.0%}\n"
+               f"Failures: drop {r['drop_rate']:.1%}, timeout {r['timeout_rate']:.1%},\n"
+               f"  >140 N contact {r['unsafe_rate']:.1%}, prot. stop {r['pstop_rate']:.1%}\n\n"
+               f"In successful handovers:\n"
+               f"  peak joint speed {so['max_qd_ratio']:.2f}× limit\n"
+               f"  peak TCP speed {so['max_tcp_speed']:.2f} m/s\n"
+               f"  torque-limited cycles {so['torque_sat_frac']:.2%}\n"
+               f"  offer→grasp {so['mean_time_to_grasp']:.2f} s")
+        ax.axis("off")
+        ax.set_title("Final held-out evaluation", loc="left", fontsize=11, color=INK, fontweight="bold")
+        ax.text(0, 1, txt, va="top", fontsize=9, color=INK, transform=ax.transAxes, family="monospace")
+    else:
+        if len(xs):
+            line(ax, xs, smooth(g(tr, "ep_return")), C1, "")
+        style(ax, "Episode return (training)", "return")
 
     # ---- 7 physical constraints
     ax = fig.add_subplot(gs[3, 0])
     if len(xe):
         line(ax, xe, g(ev, "max_qd_ratio"), C1, "peak joint speed / 180°/s limit")
     ax.axhline(1.0, color=TARGET, ls="--", lw=1.2)
-    style(ax, "Joint speed vs. motor limit", "ratio")
+    style(ax, "Peak joint speed (all eps)", "ratio")
     legend(ax)
 
     ax = fig.add_subplot(gs[3, 1])
@@ -211,7 +232,7 @@ def make_report(stages, out, ckpt=None, seed=None, baseline=None):
         line(ax, xe, g(ev, "max_tcp_speed"), C1, "peak TCP speed")
     ax.axhline(0.6, color=TARGET, ls="--", lw=1.2)
     ax.text(ax.get_xlim()[0], 0.62, " 0.6 m/s cap (0.25 m/s near hand)", color=INK2, fontsize=8)
-    style(ax, "Tool speed", "m/s")
+    style(ax, "Peak tool speed (all eps)", "m/s")
 
     # ---- 8 success by object type (latest eval)
     ax = fig.add_subplot(gs[3, 3])
@@ -252,7 +273,7 @@ def make_report(stages, out, ckpt=None, seed=None, baseline=None):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--stages", default="runs/dagger:Stage 1 imitation (DAgger),runs/ppo_ft:Stage 2 PPO fine-tune")
+    p.add_argument("--stages", default="runs/dagger:1 DAgger,runs/dagger2:1b DAgger (protective stop),runs/ppo_ft:2 PPO fine-tune")
     p.add_argument("--baseline", default="runs/ppo_b")
     p.add_argument("--out", default="reports/progress.png")
     p.add_argument("--ckpt", default=None)

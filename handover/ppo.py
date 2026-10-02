@@ -201,6 +201,7 @@ def summarize(infos):
         s["drop_rate"] = float(np.mean([i["fail"] == "drop" for i in h]))
         s["timeout_rate"] = float(np.mean([i["fail"] == "timeout" for i in h]))
         s["unsafe_rate"] = float(np.mean([i["fail"] == "unsafe_contact" for i in h]))
+        s["pstop_rate"] = float(np.mean([i["fail"] == "protective_stop" for i in h]))
         s["hand_contact_rate"] = float(np.mean([i["hand_contact"] for i in h]))
         tg = [i["time_to_grasp"] for i in h if i["grasped"] and np.isfinite(i["time_to_grasp"])]
         s["time_to_grasp"] = float(np.mean(tg)) if tg else float("nan")
