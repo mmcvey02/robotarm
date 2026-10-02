@@ -11,6 +11,9 @@ import torch
 import torch.nn as nn
 
 from .env import HandoverEnv, OBS_DIM, ACT_DIM
+from .give_env import GiveEnv
+
+TASKS = {"receive": HandoverEnv, "give": GiveEnv}
 from .scripted import scripted_action
 
 EVAL_SEED0 = 10_000_000
@@ -21,9 +24,9 @@ def eval_is_distractor(i):
 
 
 # --------------------------------------------------------------------- workers
-def worker(remote, wid, n_envs, seed):
+def worker(remote, wid, n_envs, seed, task="receive"):
     os.environ["OMP_NUM_THREADS"] = "1"
-    envs = [HandoverEnv(seed=seed + 1000 * wid + i) for i in range(n_envs)]
+    envs = [TASKS[task](seed=seed + 1000 * wid + i) for i in range(n_envs)]
     obs = np.stack([e.reset() for e in envs])
     eval_queue = None  # per-env list of (seed, distractor)
     idle = np.zeros(n_envs, bool)
@@ -75,13 +78,13 @@ def worker(remote, wid, n_envs, seed):
 
 
 class VecEnv:
-    def __init__(self, n_workers, envs_per_worker, seed):
+    def __init__(self, n_workers, envs_per_worker, seed, task="receive"):
         ctx = mp.get_context("fork")
         self.remotes, self.procs = [], []
         self.n_workers, self.epw = n_workers, envs_per_worker
         for w in range(n_workers):
             a, b = ctx.Pipe()
-            p = ctx.Process(target=worker, args=(b, w, envs_per_worker, seed), daemon=True)
+            p = ctx.Process(target=worker, args=(b, w, envs_per_worker, seed, task), daemon=True)
             p.start()
             self.remotes.append(a)
             self.procs.append(p)
@@ -200,6 +203,11 @@ def summarize(infos):
         s["grasp_rate"] = float(np.mean([i["grasped"] for i in h]))
         s["drop_rate"] = float(np.mean([i["fail"] == "drop" for i in h]))
         s["timeout_rate"] = float(np.mean([i["fail"] == "timeout" for i in h]))
+        for f in sorted({i["fail"] for i in h if i["fail"]}):
+            s[f"fail_{f}"] = float(np.mean([i["fail"] == f for i in h]))
+        rd = [i["release_delay"] for i in h if np.isfinite(i.get("release_delay", np.nan))]
+        if rd:
+            s["release_delay"] = float(np.mean(rd))
         s["unsafe_rate"] = float(np.mean([i["fail"] == "unsafe_contact" for i in h]))
         s["pstop_rate"] = float(np.mean([i["fail"] == "protective_stop" for i in h]))
         s["hand_contact_rate"] = float(np.mean([i["hand_contact"] for i in h]))
@@ -229,7 +237,7 @@ def train(args):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     os.makedirs(args.out, exist_ok=True)
-    venv = VecEnv(args.workers, args.envs_per_worker, args.seed)
+    venv = VecEnv(args.workers, args.envs_per_worker, args.seed, args.task)
     N, T = venv.n, args.horizon
     ac = ActorCritic()
     opt = torch.optim.Adam(ac.parameters(), lr=args.lr, eps=1e-5)
@@ -414,6 +422,7 @@ def main():
     p.add_argument("--eval_episodes", type=int, default=210)
     p.add_argument("--target", type=float, default=0.88)
     p.add_argument("--init_from", default=None)
+    p.add_argument("--task", default="receive", choices=["receive", "give"])
     p.add_argument("--init_log_std", type=float, default=-1.2)
     p.add_argument("--critic_warmup", type=int, default=0)
     args = p.parse_args()

@@ -239,8 +239,7 @@ class HandoverEnv:
         mujoco.mj_resetData(m, d)
         self.distractor = (rng.random() < self.distractor_prob) if distractor is None else distractor
         self._setup_object()
-        self.R_obj = self._object_frame()
-        self._plan_human()
+        self._plan_task()
         self.release_t = None
         self.release_hand = None
         self.t = 0.0
@@ -254,8 +253,34 @@ class HandoverEnv:
         d.ctrl[6:8] = FINGER_OPEN
         self.finger_tgt = FINGER_OPEN
         self.grip_cmd = 0.0
+        self._init_task()
 
-        # object & hand
+        # sensors
+        self.lat = rng.integers(1, 3)  # camera pipeline latency (control steps)
+        self.cam_bias = rng.normal(scale=0.004, size=3)
+        self.percept_hist = []
+        self.ft_bias = None
+        self.prev_action = np.zeros(ACT_DIM)
+        self.v_prev = np.zeros(3)
+        self.qd_prev = np.zeros(6)
+        self.pstop = False
+        self.w_prev = np.zeros(3)
+        # metrics
+        self.mt = dict(grasp_t=None, contact_both_t=None, hold_steps=0, hand_contact=False,
+                       max_hand_force=0.0, max_tcp_speed=0.0, max_qd_ratio=0.0, torque_sat=0,
+                       jl_hits=0, max_dist_home=0.0, obj_touched=False, path=0.0, sub=0)
+        self.ft_bias = self._ft_raw()
+        self._perceive(init=True)
+        return self._obs()
+
+    def _plan_task(self):
+        """Receive task: sample how the human holds and offers the object."""
+        self.R_obj = self._object_frame()
+        self._plan_human()
+
+    def _init_task(self):
+        """Receive task: the human holds the object; the gripper starts open at home."""
+        m, d = self.m, self.d
         k = self.k
         hp = self._hand_pos(0.0)
         d.mocap_pos[self.hand_mocap] = hp
@@ -275,26 +300,6 @@ class HandoverEnv:
         d.qpos[oa + 3:oa + 7] = qrel
         mujoco.mj_forward(m, d)
 
-        # sensors
-        self.lat = rng.integers(1, 3)  # camera pipeline latency (control steps)
-        self.cam_bias = rng.normal(scale=0.004, size=3)
-        self.percept_hist = []
-        self.ft_bias = None
-        self.prev_action = np.zeros(ACT_DIM)
-        self.v_prev = np.zeros(3)
-        self.qd_prev = np.zeros(6)
-        self.pstop = False
-        self.w_prev = np.zeros(3)
-        self.vel_hist = []
-        self.last_seen = None
-        # metrics
-        self.mt = dict(grasp_t=None, contact_both_t=None, hold_steps=0, hand_contact=False,
-                       max_hand_force=0.0, max_tcp_speed=0.0, max_qd_ratio=0.0, torque_sat=0,
-                       jl_hits=0, max_dist_home=0.0, obj_touched=False, path=0.0, sub=0)
-        self.ft_bias = self._ft_raw()
-        self._perceive(init=True)
-        return self._obs()
-
     # ------------------------------------------------------------- sensing
     def _ft_raw(self):
         d = self.d
@@ -308,9 +313,14 @@ class HandoverEnv:
         c = d.xpos[b]
         return c + R @ (self.R_obj.T @ self.grasp_off), R, c
 
+    def _target(self):
+        """Where the TCP should go (grasp point on the offered object) and the object orientation."""
+        g, R, _ = self._true_object()
+        return g, R
+
     def _perceive(self, init=False):
         """External depth camera (+ wrist camera when close): noisy, delayed, may drop out."""
-        g, R, c = self._true_object()
+        g, R = self._target()
         hand = self.d.mocap_pos[self.hand_mocap].copy()
         tcp = self.d.site_xpos[self.tcp]
         near = np.linalg.norm(g - tcp) < 0.15
@@ -396,9 +406,14 @@ class HandoverEnv:
         return pad_obj, hand_f, obj_table, obj_robot
 
     def step(self, action):
-        m, d = self.m, self.d
         a = np.clip(np.asarray(action, dtype=np.float64), -1, 1)
-        tcp = d.site_xpos[self.tcp].copy()
+        tcp = self.d.site_xpos[self.tcp].copy()
+        self._control(a, tcp)
+        return self._task_step(a, tcp)
+
+    def _control(self, a, tcp):
+        """Safety layer -> differential IK -> 500 Hz servo, with the 100 Hz safety monitor."""
+        m, d = self.m, self.d
 
         # --- safety layer: speed & separation monitoring, accel limits
         v = a[:3] * V_MAX
@@ -465,6 +480,49 @@ class HandoverEnv:
         self.t += CTRL_DT
         self.steps += 1
 
+    def _common_metrics(self, tcp, hand_f, obj_robot):
+        d, mt = self.d, self.mt
+        tcp_new = d.site_xpos[self.tcp]
+        mt["path"] += np.linalg.norm(tcp_new - tcp)
+        qn = d.qpos[self.qadr]
+        mt["jl_hits"] += int(np.any((qn < JOINT_LIMITS[:, 0] + 0.01) | (qn > JOINT_LIMITS[:, 1] - 0.01)))
+        if hand_f > 0:
+            mt["hand_contact"] = True
+        mt["max_hand_force"] = max(mt["max_hand_force"], hand_f)
+        dist_home = np.linalg.norm(tcp_new - self.tcp_home)
+        mt["max_dist_home"] = max(mt["max_dist_home"], dist_home)
+        mt["obj_touched"] |= obj_robot
+        return tcp_new, dist_home
+
+    def _safety_terms(self, a, hand_f):
+        """Shared reward terms and safety terminations."""
+        da = a - self.prev_action
+        rew = -0.02 * float(da @ da)
+        done, fail = False, None
+        if hand_f > 0:
+            rew -= 1.0 + 0.02 * hand_f
+        if hand_f > HAND_FORCE_LIMIT:
+            done, fail = True, "unsafe_contact"
+            rew -= 20
+        if self.pstop and not done:
+            done, fail = True, "protective_stop"
+            rew -= 10
+        return rew, done, fail
+
+    def _common_info(self, success, fail, timeout):
+        mt = self.mt
+        return dict(
+            success=success, distractor=self.distractor, fail=fail, timeout=timeout,
+            obj_type=int(self.k), episode_time=self.t, hand_contact=mt["hand_contact"],
+            max_hand_force=mt["max_hand_force"], max_tcp_speed=mt["max_tcp_speed"],
+            max_qd_ratio=mt["max_qd_ratio"], torque_sat_frac=mt["torque_sat"] / max(mt["sub"], 1),
+            jl_frac=mt["jl_hits"] / self.steps,
+            false_reach=bool(self.distractor and mt["max_dist_home"] >= 0.15),
+            path=mt["path"], mass=self.mass,
+        )
+
+    def _task_step(self, a, tcp):
+        m, d = self.m, self.d
         # --- human
         pad_obj, hand_f, obj_table, obj_robot = self._contacts()
         both = pad_obj[0] and pad_obj[1]
@@ -486,17 +544,8 @@ class HandoverEnv:
         self._perceive()
 
         # --- metrics
-        tcp_new = d.site_xpos[self.tcp]
+        tcp_new, dist_home = self._common_metrics(tcp, hand_f, obj_robot)
         mt = self.mt
-        mt["path"] += np.linalg.norm(tcp_new - tcp)
-        qn = d.qpos[self.qadr]
-        mt["jl_hits"] += int(np.any((qn < JOINT_LIMITS[:, 0] + 0.01) | (qn > JOINT_LIMITS[:, 1] - 0.01)))
-        if hand_f > 0:
-            mt["hand_contact"] = True
-        mt["max_hand_force"] = max(mt["max_hand_force"], hand_f)
-        dist_home = np.linalg.norm(tcp_new - self.tcp_home)
-        mt["max_dist_home"] = max(mt["max_dist_home"], dist_home)
-        mt["obj_touched"] |= obj_robot
 
         # --- reward / termination
         g, R, c = self._true_object()
@@ -509,20 +558,8 @@ class HandoverEnv:
         else:
             close_ok = 1 - abs(Rt[:, 1] @ axis)
         orient = perp * close_ok
-        rew = 0.0
-        done = False
         success = False
-        fail = None
-        da = a - self.prev_action
-        rew -= 0.02 * float(da @ da)
-        if hand_f > 0:
-            rew -= 1.0 + 0.02 * hand_f
-        if hand_f > HAND_FORCE_LIMIT:
-            done, fail = True, "unsafe_contact"
-            rew -= 20
-        if self.pstop and not done:
-            done, fail = True, "protective_stop"
-            rew -= 10
+        rew, done, fail = self._safety_terms(a, hand_f)
         presented = self.t >= self.t_present - 0.3
         if self.distractor:
             rew -= 2.0 * max(0.0, dist_home - 0.08) + 0.1 * self.grip_cmd
@@ -565,16 +602,11 @@ class HandoverEnv:
         self.prev_action = a.copy()
         info = {}
         if done:
-            info = dict(
-                success=success, distractor=self.distractor, fail=fail, timeout=timeout,
-                obj_type=int(self.k), grasped=self.mt["grasp_t"] is not None,
+            info = self._common_info(success, fail, timeout)
+            info.update(
+                grasped=self.mt["grasp_t"] is not None,
                 released=self.release_t is not None,
                 time_to_grasp=(self.mt["grasp_t"] - self.t_present) if (
                     self.mt["grasp_t"] is not None and np.isfinite(self.t_present)) else np.nan,
-                episode_time=self.t, hand_contact=mt["hand_contact"],
-                max_hand_force=mt["max_hand_force"], max_tcp_speed=mt["max_tcp_speed"],
-                max_qd_ratio=mt["max_qd_ratio"], torque_sat_frac=mt["torque_sat"] / max(mt["sub"], 1),
-                jl_frac=mt["jl_hits"] / self.steps, false_reach=bool(self.distractor and mt["max_dist_home"] >= 0.15),
-                path=mt["path"], mass=self.mass,
             )
         return self._obs(), float(rew), done, info

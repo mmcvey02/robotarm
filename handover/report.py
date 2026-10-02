@@ -13,7 +13,22 @@ import matplotlib.pyplot as plt
 import mujoco
 import torch
 
-from .env import HandoverEnv
+from .ppo import TASKS
+
+LABELS = {
+    "receive": dict(
+        title="Robot-arm handover policy (human → robot) — training progress (MuJoCo; teacher–student DAgger)",
+        success="Handover success rate (grasped + held 1 s after human lets go)",
+        o1=("grasp_rate", "grasp established"), o2=("drop_rate", "dropped after release"),
+        o3=("timeout_rate", "timed out (no grasp in 9 s)"), time="Offer → secure grasp time",
+        final="reports/final_eval.json"),
+    "give": dict(
+        title="Robot-arm handover policy (robot → human) — training progress (MuJoCo; teacher–student DAgger)",
+        success="Give success (person takes part, robot releases on their pull)",
+        o1=("grasp_rate", "person took hold"), o2=("drop_rate", "dropped (released too early)"),
+        o3=("fail_no_release", "held on too long (tug-of-war)"), time="Reach-out → release time",
+        final="reports/final_eval_give.json"),
+}
 from .ppo import ActorCritic, RunningNorm, EVAL_SEED0
 
 C1, C2, C3 = "#2a78d6", "#eb6834", "#1baf7a"  # categorical slots 1-3
@@ -63,13 +78,13 @@ def legend(ax):
     ax.legend(fontsize=8, frameon=False, labelcolor=INK2, loc="best")
 
 
-def rollout_frames(ckpt, seed, n_frames=6, size=(320, 400)):
+def rollout_frames(ckpt, seed, n_frames=6, size=(320, 400), task="receive"):
     s = torch.load(ckpt, weights_only=False)
     ac = ActorCritic()
     ac.load_state_dict(s["model"])
     norm = RunningNorm(len(s["norm"]["mean"]))
     norm.load(s["norm"])
-    env = HandoverEnv(seed=0)
+    env = TASKS[task](seed=0)
     obs = env.reset(seed=seed, distractor=False)
     r = mujoco.Renderer(env.m, *size)
     frames, done, info = [], False, {}
@@ -104,7 +119,8 @@ def load_stages(stages):
     return tr, ev, bounds
 
 
-def make_report(stages, out, ckpt=None, seed=None, baseline=None):
+def make_report(stages, out, ckpt=None, seed=None, baseline=None, task="receive"):
+    L = LABELS[task]
     tr, ev, bounds = load_stages(stages)
     base = load_jsonl(os.path.join(baseline, "eval.jsonl")) if baseline else []
     fig = plt.figure(figsize=(16, 15), facecolor="white")
@@ -133,7 +149,7 @@ def make_report(stages, out, ckpt=None, seed=None, baseline=None):
         x0 = i / len(tiles)
         axh.text(x0, 0.95, k, fontsize=10, color=INK2, transform=axh.transAxes, va="top")
         axh.text(x0, 0.45, v, fontsize=22, color=INK, fontweight="bold", transform=axh.transAxes, va="top")
-    fig.suptitle("Robot-arm handover policy — training progress (MuJoCo; teacher–student DAgger)", x=0.06, ha="left",
+    fig.suptitle(L["title"], x=0.06, ha="left",
                  y=0.93, fontsize=16, fontweight="bold", color=INK)
 
     # ---- 1 success
@@ -150,15 +166,15 @@ def make_report(stages, out, ckpt=None, seed=None, baseline=None):
         ax.axvline(b0 / 1e6, color=GRID, lw=1.5)
         ax.text(b0 / 1e6, 0.95, " " + lab, color=INK2, fontsize=8)
     ax.text(ax.get_xlim()[0], 0.865, " 85% target", color=INK2, fontsize=8)
-    style(ax, "Handover success rate (grasped + held 1 s after human lets go)", pct=True)
+    style(ax, L["success"], pct=True)
     legend(ax)
 
     # ---- 2 outcome breakdown
     ax = fig.add_subplot(gs[1, 2:4])
     if len(xe):
-        line(ax, xe, g(ev, "grasp_rate"), C1, "grasp established")
-        line(ax, xe, g(ev, "drop_rate"), C2, "dropped after release")
-        line(ax, xe, g(ev, "timeout_rate"), C3, "timed out (no grasp in 9 s)")
+        line(ax, xe, g(ev, L["o1"][0]), C1, L["o1"][1])
+        line(ax, xe, g(ev, L["o2"][0]), C2, L["o2"][1])
+        line(ax, xe, np.nan_to_num(g(ev, L["o3"][0])), C3, L["o3"][1])
     style(ax, "Outcome breakdown (evaluation)", pct=True)
     legend(ax)
 
@@ -183,11 +199,11 @@ def make_report(stages, out, ckpt=None, seed=None, baseline=None):
     ax = fig.add_subplot(gs[2, 2])
     if len(xe):
         line(ax, xe, g(ev, "time_to_grasp"), C1, "")
-    style(ax, "Offer → secure grasp time", "seconds")
+    style(ax, L["time"], "seconds")
 
     # ---- 6 return
     ax = fig.add_subplot(gs[2, 3])
-    fe = "reports/final_eval.json"
+    fe = L["final"]
     if os.path.exists(fe):
         with open(fe) as f:
             r = json.load(f)
@@ -196,8 +212,8 @@ def make_report(stages, out, ckpt=None, seed=None, baseline=None):
         txt = (f"Held-out test ({r['n_handover']} offers, {r['n_distractor']} non-offers)\n\n"
                f"Success: {r['success']:.1%}  (95% CI {lo:.1%}–{hi:.1%})\n"
                f"Non-offers ignored: {r['distractor_success']:.0%}\n"
-               f"Failures: drop {r['drop_rate']:.1%}, timeout {r['timeout_rate']:.1%},\n"
-               f"  >140 N contact {r['unsafe_rate']:.1%}, prot. stop {r['pstop_rate']:.1%}\n\n"
+               f"Failures: " + ", ".join(f"{k[5:]} {v:.1%}" for k, v in r.items() if k.startswith("fail_")) + "\n"
+               "\n"
                f"In successful handovers:\n"
                f"  peak joint speed {so['max_qd_ratio']:.2f}× limit\n"
                f"  peak TCP speed {so['max_tcp_speed']:.2f} m/s\n"
@@ -250,7 +266,7 @@ def make_report(stages, out, ckpt=None, seed=None, baseline=None):
 
     # ---- filmstrip
     if ckpt and os.path.exists(ckpt):
-        frames, wrist, info = rollout_frames(ckpt, seed if seed is not None else EVAL_SEED0 + 3)
+        frames, wrist, info = rollout_frames(ckpt, seed if seed is not None else EVAL_SEED0 + 3, task=task)
         sub = gs[4, :].subgridspec(1, len(frames) + 1, wspace=0.04)
         for i, (t, im) in enumerate(frames):
             ax = fig.add_subplot(sub[0, i])
@@ -278,7 +294,8 @@ if __name__ == "__main__":
     p.add_argument("--out", default="reports/progress.png")
     p.add_argument("--ckpt", default=None)
     p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--task", default="receive", choices=["receive", "give"])
     a = p.parse_args()
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
     stages = [tuple(x.split(":", 1)) for x in a.stages.split(",")]
-    print(make_report(stages, a.out, a.ckpt, a.seed, a.baseline))
+    print(make_report(stages, a.out, a.ckpt, a.seed, a.baseline or None, a.task))

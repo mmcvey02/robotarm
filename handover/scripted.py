@@ -21,7 +21,31 @@ def orient_error(Rt, R, k):
     return 0.5 * sum(np.cross(Rt[:, i], Rd[:, i]) for i in range(3))
 
 
+def scripted_give(env):
+    """Privileged teacher for the robot-to-human handover."""
+    d = env.d
+    tcp = d.site_xpos[env.tcp]
+    Rt = d.site_xmat[env.tcp].reshape(3, 3)
+    a = np.zeros(7)
+    a[6] = 1  # keep holding by default
+    # keep the tool (and thus the part) in its home orientation
+    a[3:6] = np.clip(0.5 * sum(np.cross(Rt[:, i], env.Rt_home[:, i]) for i in range(3)) * 3 / W_MAX, -1, 1)
+    if env.release_t is not None or (env.pull_start_t is not None and env.t - env.pull_start_t >= 0.1):
+        a[6] = -1  # the person has the part and is pulling: let go, then back away
+        if env.release_t is not None:
+            a[:3] = np.clip((env.tcp_home - tcp) * 3 / V_MAX, -1, 1)
+        return a
+    if env.distractor or env.t < env.t_present - 0.2 or env.human_grasp_t is not None:
+        tgt = env.tcp_home if (env.distractor or env.t < env.t_present - 0.2) else tcp
+    else:
+        tgt, _ = env._target()
+    a[:3] = np.clip((tgt - tcp) * 5 / V_MAX, -1, 1)
+    return a
+
+
 def scripted_action(env):
+    if hasattr(env, "human_grasp_t"):
+        return scripted_give(env)
     d = env.d
     tcp = d.site_xpos[env.tcp]
     Rt = d.site_xmat[env.tcp].reshape(3, 3)
