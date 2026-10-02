@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+runs/*/ckpt_latest.pt*
+runs/*/train.log
